@@ -223,7 +223,7 @@ le_result_t pa_amr_StartDecoder
 
 //--------------------------------------------------------------------------------------------------
 /**
- *Decode AMR frames
+ * Decode AMR frames
  *
  * @return LE_FAULT         Incorrect input parameters.
  * @return LE_UNDERFLOW     Not enough read data.
