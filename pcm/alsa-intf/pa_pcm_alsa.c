@@ -13,17 +13,50 @@
 #include "pa_pcm.h"
 
 #include <alsa-intf/alsa_audio.h>
+#include <sys/poll.h>
+
 
 //--------------------------------------------------------------------------------------------------
 // Symbol and Enum definitions.
 //--------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+/**
+ * Define the thread name length.
+ */
+//--------------------------------------------------------------------------------------------------
+#define PCM_THREAD_NAME_LEN 30
 
+//--------------------------------------------------------------------------------------------------
+// Data structures.
+//--------------------------------------------------------------------------------------------------
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Platform Adaptor Context.
+ */
+//--------------------------------------------------------------------------------------------------
+typedef struct
+{
+    struct pcm*         pcmPtr;         ///< ALSA-intf handle
+    struct pollfd       pfd[1];         ///< file descriptor used to monitor to alsa timer
+    int                 start;          ///< ALSA driver is started
+    GetSetFramesFunc_t  framesFunc;     ///< Upper layer (i.e. le_media) callback to get/set frames
+    ResultFunc_t        resultFunc;     ///< Upper layer (i.e. le_media) result callback
+    void*               contextPtr;     ///< Upper layer (i.e. le_media) context
+    le_thread_Ref_t     pcmThreadRef;   ///< Playback/Capture thread reference
+}
+AlsaIntf_t;
 
 //--------------------------------------------------------------------------------------------------
 //                                       Static declarations
 //--------------------------------------------------------------------------------------------------
 
-
+//--------------------------------------------------------------------------------------------------
+/**
+ * The memory pool for the Alsa interface
+ */
+//--------------------------------------------------------------------------------------------------
+static le_mem_PoolRef_t AlsaIntfPool;
 
 //--------------------------------------------------------------------------------------------------
 // Data structures.
@@ -35,7 +68,6 @@
  */
 //--------------------------------------------------------------------------------------------------
 typedef le_result_t (*SetPcmParamsFunc_t)(struct pcm *pcm);
-
 
 //--------------------------------------------------------------------------------------------------
 //                                       Static declarations
@@ -295,8 +327,6 @@ static le_result_t InitPcmPlaybackCapture
 {
     uint32_t format;
 
-    flags |= PCM_NMMAP;
-
     if (pcmConfig->channelsCount == 1)
     {
         flags |= PCM_MONO;
@@ -341,13 +371,16 @@ static le_result_t InitPcmPlaybackCapture
         return LE_FAULT;
     }
 
-
     struct pcm *myPcmPtr = pcm_open(flags, (char*) devicePtr);
 
     if (myPcmPtr < 0)
     {
         return LE_FAULT;
     }
+
+    AlsaIntf_t* alsaIntfPtr = le_mem_ForceAlloc(AlsaIntfPool);
+    memset(alsaIntfPtr, 0, sizeof(AlsaIntf_t));
+    alsaIntfPtr->pcmPtr = myPcmPtr;
 
     myPcmPtr->channels = pcmConfig->channelsCount;
     myPcmPtr->rate     = pcmConfig->sampleRate;
@@ -363,85 +396,389 @@ static le_result_t InitPcmPlaybackCapture
 
         if (paramsFunc(myPcmPtr)==LE_OK)
         {
-            if (pcm_prepare(myPcmPtr))
+            // MMAP
+            if (flags & PCM_MMAP)
             {
-                LE_ERROR("Failed in pcm_prepare");
-                return LE_FAULT;
+                if (mmap_buffer(myPcmPtr))
+                {
+                     LE_ERROR("mmap_buffer failed");
+                     pcm_close(myPcmPtr);
+                     le_mem_Release(alsaIntfPtr);
+                     return LE_FAULT;
+                }
+
+                if (pcm_prepare(myPcmPtr))
+                {
+                    LE_ERROR("Failed in pcm_prepare");
+                    pcm_close(myPcmPtr);
+                    le_mem_Release(alsaIntfPtr);
+                    return LE_FAULT;
+                }
+
+                alsaIntfPtr->pfd[0].fd = myPcmPtr->timer_fd;
+                alsaIntfPtr->pfd[0].events = POLLIN;
+            }
+            // NMMAP
+            else
+            {
+                if (pcm_prepare(myPcmPtr))
+                {
+                    LE_ERROR("Failed in pcm_prepare");
+                    pcm_close(myPcmPtr);
+                    le_mem_Release(alsaIntfPtr);
+                    return LE_FAULT;
+                }
             }
         }
         else
         {
             LE_ERROR("Failed in set_params");
+            le_mem_Release(alsaIntfPtr);
             return LE_FAULT;
         }
     }
     else
     {
         LE_ERROR("PCM is not ready (pcm error: %s)", pcm_error(myPcmPtr));
+        le_mem_Release(alsaIntfPtr);
         return LE_FAULT;
     }
 
-    *pcmHandlePtr = (pcm_Handle_t) myPcmPtr;
+    *pcmHandlePtr = (pcm_Handle_t) alsaIntfPtr;
 
     return LE_OK;
 }
 
+//--------------------------------------------------------------------------------------------------
+/**
+ * Capture thread
+ *
+ */
+//--------------------------------------------------------------------------------------------------
+static void* CaptureThread
+(
+    void* contextPtr
+)
+{
+    AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) contextPtr;
+    struct pcm *pcm = (struct pcm *) alsaIntfPtr->pcmPtr;
+    uint32_t bufsize;
+    le_result_t res = LE_OK;
+
+    bufsize = pcm->period_size;
+
+    uint8_t data[bufsize];
+    memset(data,0,bufsize);
+
+    while (res == LE_OK)
+    {
+        int myErrno;
+
+        // Start acquisition
+        if ( (myErrno = pcm_read(pcm, data, bufsize)) != 0 )
+        {
+            LE_ERROR("Could not read %d void bytes! errno %d", bufsize, -myErrno);
+            res = LE_FAULT;
+        }
+        else
+        {
+            if ( !alsaIntfPtr->framesFunc ||
+                 ( alsaIntfPtr->framesFunc ( data,
+                                             &bufsize,
+                                             alsaIntfPtr->contextPtr ) != LE_OK ) )
+            {
+                res = LE_FAULT;
+            }
+        }
+    }
+
+    if (alsaIntfPtr->resultFunc)
+    {
+        LE_DEBUG("Record end, res = %d", res);
+        alsaIntfPtr->resultFunc(res, alsaIntfPtr->contextPtr);
+    }
+
+    le_event_RunLoop();
+    // Should never happened
+    return NULL;
+}
+
+
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Run playback: send PCM samples to ALSA until all are sent
+ *
+ */
+//--------------------------------------------------------------------------------------------------
+static le_result_t RunPlayback
+(
+    AlsaIntf_t* alsaIntfPtr
+)
+{
+    struct pcm *pcm = (struct pcm *) alsaIntfPtr->pcmPtr;
+    int err;
+    long avail;
+    int nfds = 1;
+    uint8_t* bufferPtr = NULL;
+    uint32_t bufLen=0;
+    le_result_t res = LE_UNAVAILABLE;
+    int myErrno;
+    enum
+    {
+        STATE_RUNNING,
+        STATE_END,
+
+    } state = STATE_RUNNING;
+
+    // loop until all PCM frames have been sent
+    for(;;)
+    {
+        if (!pcm->running)
+        {
+            if (pcm_prepare(pcm))
+            {
+                return LE_FAULT;
+            }
+
+            pcm->running = 1;
+            alsaIntfPtr->start = 0;
+        }
+
+        // Sync the current Application pointer from the kernel
+        pcm->sync_ptr->flags = SNDRV_PCM_SYNC_PTR_APPL | SNDRV_PCM_SYNC_PTR_AVAIL_MIN;
+
+        err = sync_ptr(pcm);
+        if (err == EPIPE)
+        {
+            LE_ERROR("Failed in sync_ptr");
+            // We failed to make our window -- try to restart
+            pcm->underruns++;
+            pcm->running = 0;
+            continue;
+        }
+
+        // Check for the available buffer in driver. If available buffer is less than
+        // avail_min we need to wait
+        avail = pcm_avail(pcm);
+
+        if (avail < 0)
+        {
+            return LE_FAULT;
+        }
+
+        // If no space left in the driver, wait the timeout of snd timer
+        if (avail < pcm->sw_p->avail_min)
+        {
+            poll(alsaIntfPtr->pfd, nfds, TIMEOUT_INFINITE);
+            continue;
+        }
+
+        // Now that we have buffer size greater than avail_min available to to be written we
+        // need to calcutate the buffer offset where we can start writting.
+
+        bufLen = pcm->period_size;
+        bufferPtr = dst_address(pcm);
+
+        memset(bufferPtr, 0, bufLen);
+
+        // Get the PCM frames (from upper layer) to be sent to ALSA
+        if ( alsaIntfPtr->framesFunc )
+        {
+            if ( alsaIntfPtr->framesFunc ( bufferPtr,
+                                           &bufLen,
+                                           alsaIntfPtr->contextPtr ) != LE_OK )
+            {
+                return LE_FAULT;
+            }
+        }
+        else
+        {
+            return LE_FAULT;
+        }
+
+        // All frames have been sent => playback ended
+        if (bufLen == 0)
+        {
+            state = STATE_END;
+        }
+        else
+        {
+            res = LE_OK;
+        }
+
+        if ( (myErrno = pcm_write(pcm, bufferPtr, pcm->period_size)) != 0 )
+        {
+            LE_ERROR("Could not write, errno %d", -myErrno);
+            res = LE_FAULT;
+        }
+
+        // End rerached => exit the loop
+        if (state == STATE_END)
+        {
+            break;
+        }
+    }
+
+    // Wait until the ALSA driver FIFO is empty
+    while(1)
+    {
+        pcm->sync_ptr->flags = SNDRV_PCM_SYNC_PTR_APPL | SNDRV_PCM_SYNC_PTR_AVAIL_MIN;
+        if (sync_ptr(pcm) < 0)
+        {
+            res = LE_FAULT;
+            break;
+        }
+
+        // Check for the available buffer in driver. If available buffer is less than avail_min
+        // we need to wait
+        if (pcm->sync_ptr->s.status.hw_ptr >= pcm->sync_ptr->c.control.appl_ptr)
+        {
+            break;
+        }
+    }
+
+    return res;
+}
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Playback thread
+ *
+ */
+//--------------------------------------------------------------------------------------------------
+static void* PlaybackThread
+(
+    void* contextPtr
+)
+{
+    AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) contextPtr;
+    struct pcm *pcmPtr = (struct pcm *) alsaIntfPtr->pcmPtr;
+    le_result_t res;
+
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+
+    if (pcmPtr->flags & PCM_MMAP)
+    {
+        // run in loop if no error, until the thread is killed
+        // This loop is useful for the play samples use case.
+        while (res != LE_FAULT)
+        {
+            res = RunPlayback(alsaIntfPtr);
+
+            if (res == LE_OK)
+            {
+                if (alsaIntfPtr->resultFunc)
+                {
+                    LE_DEBUG("Play end, res = %d", res);
+                    alsaIntfPtr->resultFunc(res, alsaIntfPtr->contextPtr);
+                }
+            }
+        }
+    }
+
+    le_event_RunLoop();
+
+    return NULL;
+}
 
 //--------------------------------------------------------------------------------------------------
 //                                       Public declarations
 //--------------------------------------------------------------------------------------------------
 
+
 //--------------------------------------------------------------------------------------------------
 /**
- * Write PCM frames to sound driver.
+ * Start the playback.
+ * The function is asynchronous: it starts the playback thread, then returns.
  *
  */
 //--------------------------------------------------------------------------------------------------
-le_result_t pa_pcm_Write
+le_result_t pa_pcm_Play
 (
-    pcm_Handle_t pcmHandle,                 ///< [IN] Handle of the audio resource given by
+    pcm_Handle_t pcmHandle                  ///< [IN] Handle of the audio resource given by
                                             ///< pa_pcm_InitPlayback() / pa_pcm_InitCapture()
                                             ///< initialization functions
-    char* data,                             ///< [OUT] Write buffer
-    uint32_t bufsize                        ///< [IN] Buffer length
 )
 {
-    struct pcm *pcm = (struct pcm *) pcmHandle;
-    int myErrno;
+    AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) pcmHandle;
+    char threadName[PCM_THREAD_NAME_LEN]="\0";
+    static int counter = 0;
 
-    if ( (myErrno = pcm_write(pcm, data, bufsize)) != 0 )
-    {
-        LE_ERROR("Could not write %d void bytes! errno %d", bufsize, -myErrno);
-        return LE_FAULT;
+    snprintf(threadName, PCM_THREAD_NAME_LEN, "Playback-%d", counter);
+    counter++;
 
-    }
+    alsaIntfPtr->pcmThreadRef = le_thread_Create(threadName,
+                                                PlaybackThread,
+                                                alsaIntfPtr);
+
+    le_thread_SetJoinable(alsaIntfPtr->pcmThreadRef);
+
+    le_thread_SetJoinable(alsaIntfPtr->pcmThreadRef);
+
+    le_thread_Start(alsaIntfPtr->pcmThreadRef);
+
+    return LE_OK;
+
+}
+
+//--------------------------------------------------------------------------------------------------
+/**
+ * Start the recording.
+ * The function is asynchronous: it starts the recording thread, then returns.
+ *
+ */
+//--------------------------------------------------------------------------------------------------
+le_result_t pa_pcm_Capture
+(
+    pcm_Handle_t pcmHandle                 ///< [IN] Handle of the audio resource given by
+                                            ///< pa_pcm_InitPlayback() / pa_pcm_InitCapture()
+                                            ///< initialization functions
+)
+{
+    AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) pcmHandle;
+    char threadName[PCM_THREAD_NAME_LEN]="\0";
+    static int counter = 0;
+
+    snprintf(threadName, PCM_THREAD_NAME_LEN, "AudioCapture-%d", counter);
+    counter++;
+
+    alsaIntfPtr->pcmThreadRef = le_thread_Create(threadName,
+                                            CaptureThread,
+                                            alsaIntfPtr);
+
+    le_thread_SetJoinable(alsaIntfPtr->pcmThreadRef);
+
+    le_thread_Start(alsaIntfPtr->pcmThreadRef);
+
     return LE_OK;
 }
 
 //--------------------------------------------------------------------------------------------------
 /**
- * Read PCM frames from sound driver.
+ * Set the callbacks called during a playback/recording to:
+ * - get/set PCM frames thanks to getFramesFunc callback: this callback will be called by the pa_pcm
+ * to get the next PCM frames to play (playback case), or to send back PCM frames to record
+ * (recording case).
+ * - get the playback/recording result thanks to setResultFunc callback: this callback will be
+ * called by the PA_PCM to inform the caller about the status of the playback or the recording.
  *
  */
 //--------------------------------------------------------------------------------------------------
-le_result_t pa_pcm_Read
+le_result_t pa_pcm_SetCallbackHandlers
 (
-    pcm_Handle_t pcmHandle,                 ///< [IN] Handle of the audio resource given by
-                                            ///< pa_pcm_InitPlayback() / pa_pcm_InitCapture()
-                                            ///< initialization functions
-    char* data,                             ///< [IN] Read buffer
-    uint32_t bufsize                        ///< [IN] Buffer length
+    pcm_Handle_t pcmHandle,
+    GetSetFramesFunc_t framesFunc,
+    ResultFunc_t resultFunc,
+    void* contextPtr
 )
 {
-    struct pcm *pcm = (struct pcm *) pcmHandle;
-    int myErrno;
+    AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) pcmHandle;
 
-    if ( (myErrno = pcm_read(pcm, data, bufsize)) != 0 )
-    {
-        LE_ERROR("Could not write %d void bytes! errno %d", bufsize, -myErrno);
-        return LE_FAULT;
+    alsaIntfPtr->framesFunc = framesFunc;
+    alsaIntfPtr->resultFunc = resultFunc;
+    alsaIntfPtr->contextPtr = contextPtr;
 
-    }
     return LE_OK;
 }
 
@@ -458,17 +795,28 @@ le_result_t pa_pcm_Close
                                            ///< initialization functions
 )
 {
-    struct pcm *pcm = (struct pcm *) pcmHandle;
+    AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) pcmHandle;
+    le_thread_Ref_t pcmThreadRef = alsaIntfPtr->pcmThreadRef;
 
-    LE_DEBUG("Call pcm_close");
-    if  (pcm_close(pcm) == 0)
+    if (pcmThreadRef)
     {
-        return LE_OK;
+        le_thread_Cancel(pcmThreadRef);
+        le_thread_Join(pcmThreadRef, NULL);
+
+        LE_DEBUG("Close ALSA");
+        if  (pcm_close(alsaIntfPtr->pcmPtr) == 0)
+        {
+            LE_DEBUG("end PCM thread");
+            le_mem_Release(alsaIntfPtr);
+        }
+        else
+        {
+            LE_ERROR("Error during pcm close");
+            return LE_FAULT;
+        }
     }
-    else
-    {
-        return LE_FAULT;
-    }
+
+    return LE_OK;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -484,7 +832,8 @@ uint32_t pa_pcm_GetPeriodSize
                                             ///< initialization functions
 )
 {
-    struct pcm *pcm = (struct pcm *) pcmHandle;
+    AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) pcmHandle;
+    struct pcm *pcm = (struct pcm *) alsaIntfPtr->pcmPtr;
     return pcm->period_size;
 }
 
@@ -502,7 +851,7 @@ le_result_t pa_pcm_InitCapture
     le_audio_SamplePcmConfig_t* pcmConfig   ///< [IN] Samples PCM configuration
 )
 {
-    uint32_t flags = PCM_IN;
+    uint32_t flags = PCM_NMMAP | PCM_IN;
 
     return InitPcmPlaybackCapture( pcmHandlePtr,
                                    devicePtr,
@@ -525,7 +874,7 @@ le_result_t pa_pcm_InitPlayback
     le_audio_SamplePcmConfig_t* pcmConfig   ///< [IN] Samples PCM configuration
 )
 {
-    uint32_t flags = PCM_OUT;
+    uint32_t flags = PCM_MMAP | PCM_OUT;
 
     return InitPcmPlaybackCapture( pcmHandlePtr,
                                    devicePtr,
@@ -541,4 +890,8 @@ le_result_t pa_pcm_InitPlayback
 //--------------------------------------------------------------------------------------------------
 COMPONENT_INIT
 {
+    // Allocate the Media thread context pool.
+    AlsaIntfPool = le_mem_CreatePool("AlsaIntfPool", sizeof(AlsaIntf_t));
+
+    le_mem_ExpandPool(AlsaIntfPool, 2);
 }
