@@ -796,23 +796,27 @@ le_result_t pa_pcm_Close
 )
 {
     AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) pcmHandle;
-    le_thread_Ref_t pcmThreadRef = alsaIntfPtr->pcmThreadRef;
 
-    if (pcmThreadRef)
+    if (pcmHandle)
     {
-        le_thread_Cancel(pcmThreadRef);
-        le_thread_Join(pcmThreadRef, NULL);
+        le_thread_Ref_t pcmThreadRef = alsaIntfPtr->pcmThreadRef;
 
-        LE_DEBUG("Close ALSA");
-        if  (pcm_close(alsaIntfPtr->pcmPtr) == 0)
+        if (pcmThreadRef)
         {
-            LE_DEBUG("end PCM thread");
-            le_mem_Release(alsaIntfPtr);
-        }
-        else
-        {
-            LE_ERROR("Error during pcm close");
-            return LE_FAULT;
+            le_thread_Cancel(pcmThreadRef);
+            le_thread_Join(pcmThreadRef, NULL);
+
+            LE_DEBUG("Close ALSA");
+            if (pcm_close(alsaIntfPtr->pcmPtr) == 0)
+            {
+                LE_DEBUG("end PCM thread");
+                le_mem_Release(alsaIntfPtr);
+            }
+            else
+            {
+                LE_ERROR("Error during pcm close");
+                return LE_FAULT;
+            }
         }
     }
 
