@@ -524,12 +524,12 @@ static le_result_t RunPlayback
     uint32_t bufLen=0;
     le_result_t res = LE_UNAVAILABLE;
     int myErrno;
-    enum
+    static enum
     {
         STATE_RUNNING,
-        STATE_END,
-
+        STATE_END
     } state = STATE_RUNNING;
+
 
     // loop until all PCM frames have been sent
     for(;;)
@@ -600,10 +600,19 @@ static le_result_t RunPlayback
         // All frames have been sent => playback ended
         if (bufLen == 0)
         {
-            state = STATE_END;
+            if (state == STATE_END)
+            {
+                res = LE_UNDERFLOW;
+            }
+            else
+            {
+                state = STATE_END;
+                res = LE_OK;
+            }
         }
         else
         {
+            state = STATE_RUNNING;
             res = LE_OK;
         }
 
@@ -613,7 +622,7 @@ static le_result_t RunPlayback
             res = LE_FAULT;
         }
 
-        // End rerached => exit the loop
+        // End reached => exit the loop
         if (state == STATE_END)
         {
             break;
@@ -666,13 +675,10 @@ static void* PlaybackThread
         {
             res = RunPlayback(alsaIntfPtr);
 
-            if (res == LE_OK)
+            if (alsaIntfPtr->resultFunc)
             {
-                if (alsaIntfPtr->resultFunc)
-                {
-                    LE_DEBUG("Play end, res = %d", res);
-                    alsaIntfPtr->resultFunc(res, alsaIntfPtr->contextPtr);
-                }
+                LE_DEBUG("Play end, res = %d", res);
+                alsaIntfPtr->resultFunc(res, alsaIntfPtr->contextPtr);
             }
         }
     }
@@ -711,8 +717,6 @@ le_result_t pa_pcm_Play
     alsaIntfPtr->pcmThreadRef = le_thread_Create(threadName,
                                                 PlaybackThread,
                                                 alsaIntfPtr);
-
-    le_thread_SetJoinable(alsaIntfPtr->pcmThreadRef);
 
     le_thread_SetJoinable(alsaIntfPtr->pcmThreadRef);
 
