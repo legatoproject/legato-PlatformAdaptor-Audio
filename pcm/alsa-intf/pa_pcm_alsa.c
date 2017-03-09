@@ -571,6 +571,10 @@ static le_result_t RunPlayback
         if (avail < pcm->sw_p->avail_min)
         {
             poll(alsaIntfPtr->pfd, nfds, TIMEOUT_INFINITE);
+            // It is a workaround to reduce the CPU charge due to the loop if no more space are
+            // avail able in the driver. The 50us usleep value has be set by test to reduce the
+            // CPU charge.
+            usleep(50);
             continue;
         }
 
@@ -717,6 +721,8 @@ le_result_t pa_pcm_Play
     alsaIntfPtr->pcmThreadRef = le_thread_Create(threadName,
                                                 PlaybackThread,
                                                 alsaIntfPtr);
+
+    le_thread_SetPriority(alsaIntfPtr->pcmThreadRef, LE_THREAD_PRIORITY_RT_2);
 
     le_thread_SetJoinable(alsaIntfPtr->pcmThreadRef);
 
