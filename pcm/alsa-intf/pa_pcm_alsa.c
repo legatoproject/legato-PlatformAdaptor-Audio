@@ -415,8 +415,8 @@ static le_result_t InitPcmPlaybackCapture
                     return LE_FAULT;
                 }
 
-                alsaIntfPtr->pfd[0].fd = myPcmPtr->timer_fd;
-                alsaIntfPtr->pfd[0].events = POLLIN;
+                alsaIntfPtr->pfd[0].fd = myPcmPtr->fd;
+                alsaIntfPtr->pfd[0].events = POLLOUT | POLLERR;
             }
             // NMMAP
             else
@@ -570,11 +570,19 @@ static le_result_t RunPlayback
         // If no space left in the driver, wait the timeout of snd timer
         if (avail < pcm->sw_p->avail_min)
         {
-            poll(alsaIntfPtr->pfd, nfds, TIMEOUT_INFINITE);
-            // It is a workaround to reduce the CPU charge due to the loop if no more space are
-            // avail able in the driver. The 50us usleep value has be set by test to reduce the
-            // CPU charge.
-            usleep(50);
+            err = poll(alsaIntfPtr->pfd, nfds, TIMEOUT_INFINITE);
+            if (err < 0)
+            {
+                LE_ERROR("Failed in poll: %m");
+                return LE_FAULT;
+            }
+            if (alsaIntfPtr->pfd[0].revents & POLLERR)
+            {
+                // TODO: forward the IO error to the caller which can
+                // provide xrun recovery strategy
+                LE_ERROR("Event POLLERR returned by poll");
+                return LE_IO_ERROR;
+            }
             continue;
         }
 
