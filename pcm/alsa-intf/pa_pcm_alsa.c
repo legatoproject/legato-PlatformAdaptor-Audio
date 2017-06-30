@@ -37,13 +37,14 @@
 //--------------------------------------------------------------------------------------------------
 typedef struct
 {
-    struct pcm*         pcmPtr;         ///< ALSA-intf handle
-    struct pollfd       pfd[1];         ///< file descriptor used to monitor to alsa timer
-    int                 start;          ///< ALSA driver is started
-    GetSetFramesFunc_t  framesFunc;     ///< Upper layer (i.e. le_media) callback to get/set frames
-    ResultFunc_t        resultFunc;     ///< Upper layer (i.e. le_media) result callback
-    void*               contextPtr;     ///< Upper layer (i.e. le_media) context
-    le_thread_Ref_t     pcmThreadRef;   ///< Playback/Capture thread reference
+    struct pcm*         pcmPtr;             ///< ALSA-intf handle
+    struct pollfd       pfd[1];             ///< file descriptor used to monitor to alsa timer
+    int                 start;              ///< ALSA driver is started
+    GetSetFramesFunc_t  framesFunc;         ///< Upper layer (i.e. le_media) get/set frames callback
+    ResultFunc_t        resultFunc;         ///< Upper layer (i.e. le_media) result callback
+    void*               contextPtr;         ///< Upper layer (i.e. le_media) context
+    le_thread_Ref_t     pcmThreadRef;       ///< Playback/Capture thread reference
+    bool                isPlaybackRunning;  ///< True when playback is running, false otherwise
 }
 AlsaIntf_t;
 
@@ -416,7 +417,7 @@ static le_result_t InitPcmPlaybackCapture
                 }
 
                 alsaIntfPtr->pfd[0].fd = myPcmPtr->fd;
-                alsaIntfPtr->pfd[0].events = POLLOUT | POLLERR;
+                alsaIntfPtr->pfd[0].events = POLLOUT;
             }
             // NMMAP
             else
@@ -524,12 +525,6 @@ static le_result_t RunPlayback
     uint32_t bufLen=0;
     le_result_t res = LE_UNAVAILABLE;
     int myErrno;
-    static enum
-    {
-        STATE_RUNNING,
-        STATE_END
-    } state = STATE_RUNNING;
-
 
     // loop until all PCM frames have been sent
     for(;;)
@@ -578,8 +573,6 @@ static le_result_t RunPlayback
             }
             if (alsaIntfPtr->pfd[0].revents & POLLERR)
             {
-                // TODO: forward the IO error to the caller which can
-                // provide xrun recovery strategy
                 LE_ERROR("Event POLLERR returned by poll");
                 return LE_IO_ERROR;
             }
@@ -612,19 +605,19 @@ static le_result_t RunPlayback
         // All frames have been sent => playback ended
         if (bufLen == 0)
         {
-            if (state == STATE_END)
+            if (!alsaIntfPtr->isPlaybackRunning)
             {
                 res = LE_UNDERFLOW;
             }
             else
             {
-                state = STATE_END;
+                alsaIntfPtr->isPlaybackRunning = false;
                 res = LE_OK;
             }
         }
         else
         {
-            state = STATE_RUNNING;
+            alsaIntfPtr->isPlaybackRunning = true;
             res = LE_OK;
         }
 
@@ -635,7 +628,7 @@ static le_result_t RunPlayback
         }
 
         // End reached => exit the loop
-        if (state == STATE_END)
+        if (!alsaIntfPtr->isPlaybackRunning)
         {
             break;
         }
@@ -681,6 +674,7 @@ static void* PlaybackThread
 
     if (pcmPtr->flags & PCM_MMAP)
     {
+        alsaIntfPtr->isPlaybackRunning = true;
         // run in loop if no error, until the thread is killed
         // This loop is useful for the play samples use case.
         while (res != LE_FAULT)
