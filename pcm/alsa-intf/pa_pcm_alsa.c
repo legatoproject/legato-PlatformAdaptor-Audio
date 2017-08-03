@@ -668,7 +668,7 @@ static void* PlaybackThread
 {
     AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) contextPtr;
     struct pcm *pcmPtr = (struct pcm *) alsaIntfPtr->pcmPtr;
-    le_result_t res;
+    le_result_t res = LE_OK;
 
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 

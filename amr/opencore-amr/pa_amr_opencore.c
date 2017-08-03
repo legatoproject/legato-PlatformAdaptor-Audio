@@ -346,7 +346,7 @@ le_result_t pa_amr_StartEncoder
     le_audio_MediaThreadContext_t*   mediaCtxPtr   ///< [IN] Media thread context
 )
 {
-    le_result_t res;
+    le_result_t res = LE_FAULT;
 
     if (mediaCtxPtr == NULL)
     {
