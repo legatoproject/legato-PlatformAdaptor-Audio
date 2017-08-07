@@ -310,7 +310,13 @@ le_result_t pa_amr_StopDecoder
     le_audio_MediaThreadContext_t*    mediaCtxPtr    ///< [IN] Media thread context
 )
 {
-    if (!mediaCtxPtr || (mediaCtxPtr->format >= LE_AUDIO_FILE_MAX))
+    if (!mediaCtxPtr)
+    {
+        LE_ERROR("Invalid input parameter");
+        return LE_FAULT;
+    }
+
+    if (mediaCtxPtr->format >= LE_AUDIO_FILE_MAX)
     {
         LE_ERROR("Bad format %d", mediaCtxPtr->format);
         return LE_FAULT;
