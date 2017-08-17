@@ -430,11 +430,12 @@ le_result_t pa_amr_EncodeFrames
     uint32_t* outputDataLen                    ///< [OUT] output PCM buffer length
 )
 {
-    uint32_t bufLen = mediaCtxPtr->bufferSize/2;
+    uint32_t bufLen = 0;
     CodecParams_t* codecParamPtr = NULL;
 
     if (mediaCtxPtr)
     {
+        bufLen = mediaCtxPtr->bufferSize/2;
         codecParamPtr = (CodecParams_t*) mediaCtxPtr->codecParams;
     }
 
