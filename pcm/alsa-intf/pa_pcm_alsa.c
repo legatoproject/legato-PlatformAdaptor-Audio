@@ -146,6 +146,7 @@ static le_result_t SetPcmParamsPlayback
     if (param_set_hw_params(pcmPtr, params))
     {
         LE_ERROR("Cannot set hw params");
+        free(params);
         return LE_FAULT;
     }
 
@@ -162,6 +163,7 @@ static le_result_t SetPcmParamsPlayback
     if (!sparams)
     {
         LE_ERROR("Failed to allocate ALSA software parameters!");
+        free(params);
         return LE_FAULT;
     }
 
@@ -180,6 +182,8 @@ static le_result_t SetPcmParamsPlayback
     if (param_set_sw_params(pcmPtr, sparams))
     {
         LE_ERROR("Cannot set sw params");
+        free(params);
+        free(sparams);
         return LE_FAULT;
     }
 
@@ -257,6 +261,7 @@ static le_result_t SetPcmParamsCapture
     if (param_set_hw_params(pcmPtr, params))
     {
         LE_ERROR("Cannot set hw params");
+        free(params);
         return LE_FAULT;
     }
 
@@ -270,6 +275,7 @@ static le_result_t SetPcmParamsCapture
     if (!sparams)
     {
         LE_ERROR("Failed to allocate ALSA software parameters!");
+        free(params);
         return LE_FAULT;
     }
 
@@ -305,6 +311,8 @@ static le_result_t SetPcmParamsCapture
     if (param_set_sw_params(pcmPtr, sparams))
     {
         LE_ERROR("Cannot set sw params");
+        free(params);
+        free(sparams);
         return LE_FAULT;
     }
 
