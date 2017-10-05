@@ -86,8 +86,8 @@ static le_result_t SetPcmParamsPlayback
     struct pcm* pcmPtr
 )
 {
-    struct snd_pcm_hw_params *params;
-    struct snd_pcm_sw_params *sparams;
+    struct snd_pcm_hw_params *params = NULL;
+    struct snd_pcm_sw_params *sparams = NULL;
     uint32_t samplingRes;
 
     int channels = (pcmPtr->flags & PCM_MONO) ? 1 : ((pcmPtr->flags & PCM_5POINT1)? 6 : 2 );
@@ -187,6 +187,9 @@ static le_result_t SetPcmParamsPlayback
         return LE_FAULT;
     }
 
+    free(params);
+    free(sparams);
+
     return LE_OK;
 }
 
@@ -201,8 +204,8 @@ static le_result_t SetPcmParamsCapture
     struct pcm* pcmPtr
 )
 {
-    struct snd_pcm_hw_params *params;
-    struct snd_pcm_sw_params *sparams;
+    struct snd_pcm_hw_params *params = NULL;
+    struct snd_pcm_sw_params *sparams = NULL;
     uint32_t samplingRes;
 
     // can't use le_mem service, the memory is released by pcm_close()
@@ -315,6 +318,9 @@ static le_result_t SetPcmParamsCapture
         free(sparams);
         return LE_FAULT;
     }
+
+    free(params);
+    free(sparams);
 
     return LE_OK;
 }
