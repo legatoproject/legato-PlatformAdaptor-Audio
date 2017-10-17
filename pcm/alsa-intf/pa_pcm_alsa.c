@@ -187,9 +187,9 @@ static le_result_t SetPcmParamsPlayback
         return LE_FAULT;
     }
 
-    free(params);
-    free(sparams);
-
+    // Do not free params and sparams here since the data is owned by
+    // ALSA at this point; they will automatically be freed by
+    // pcm_close().
     return LE_OK;
 }
 
@@ -319,9 +319,9 @@ static le_result_t SetPcmParamsCapture
         return LE_FAULT;
     }
 
-    free(params);
-    free(sparams);
-
+    // Do not free params and sparams here since the data is owned by
+    // ALSA at this point; they will automatically be freed by
+    // pcm_close().
     return LE_OK;
 }
 
