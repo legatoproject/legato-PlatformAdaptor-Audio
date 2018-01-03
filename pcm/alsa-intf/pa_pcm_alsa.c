@@ -648,24 +648,6 @@ static le_result_t RunPlayback
         }
     }
 
-    // Wait until the ALSA driver FIFO is empty
-    while(1)
-    {
-        pcm->sync_ptr->flags = SNDRV_PCM_SYNC_PTR_APPL | SNDRV_PCM_SYNC_PTR_AVAIL_MIN;
-        if (sync_ptr(pcm) < 0)
-        {
-            res = LE_FAULT;
-            break;
-        }
-
-        // Check for the available buffer in driver. If available buffer is less than avail_min
-        // we need to wait
-        if (pcm->sync_ptr->s.status.hw_ptr >= pcm->sync_ptr->c.control.appl_ptr)
-        {
-            break;
-        }
-    }
-
     return res;
 }
 
