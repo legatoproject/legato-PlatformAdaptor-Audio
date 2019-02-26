@@ -599,7 +599,10 @@ static le_result_t RunPlayback
             if (alsaIntfPtr->pfd[0].revents & POLLERR)
             {
                 LE_ERROR("Event POLLERR returned by poll");
-                return LE_IO_ERROR;
+                // Do pcm_prepare() in next loop
+                pcm->running = 0;
+                // This tag triggers pcm device start read data from buffer in pcm_write()
+                pcm->start = 0;
             }
             continue;
         }
