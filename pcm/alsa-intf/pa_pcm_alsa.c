@@ -59,8 +59,14 @@ AlsaIntf_t;
 //--------------------------------------------------------------------------------------------------
 static le_mem_PoolRef_t AlsaIntfPool;
 
+/**
+* Define default time out for driver send PCM data. Avoid stuck issue.
+*/
 //--------------------------------------------------------------------------------------------------
-// Data structures.
+#define PCM_DEFAULT_TIME 10000
+
+//--------------------------------------------------------------------------------------------------
+//Data structures.
 //--------------------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------------------------------
@@ -579,7 +585,12 @@ static le_result_t RunPlayback
         // If no space left in the driver, wait the timeout of snd timer
         if (avail < pcm->sw_p->avail_min)
         {
-            err = poll(alsaIntfPtr->pfd, nfds, TIMEOUT_INFINITE);
+            err = poll(alsaIntfPtr->pfd, nfds, PCM_DEFAULT_TIME);
+            if(err == 0)
+            {
+                LE_ERROR("Poll timeout in %d seconds.\n", PCM_DEFAULT_TIME/1000);
+                return LE_FAULT;
+            }
             if (err < 0)
             {
                 LE_ERROR("Failed in poll: %m");
