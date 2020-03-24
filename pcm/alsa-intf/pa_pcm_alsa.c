@@ -27,6 +27,14 @@
 #define PCM_THREAD_NAME_LEN 30
 
 //--------------------------------------------------------------------------------------------------
+/**
+ * Define the time to wait for audio stream to end.
+ * This is 200 milliseconds expressed in nanoseconds.
+ */
+//--------------------------------------------------------------------------------------------------
+#define END_DELAY 200000000
+
+//--------------------------------------------------------------------------------------------------
 // Data structures.
 //--------------------------------------------------------------------------------------------------
 
@@ -818,6 +826,7 @@ le_result_t pa_pcm_Close
 )
 {
     AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) pcmHandle;
+    struct timespec endDelay = {0, END_DELAY};
 
     if (pcmHandle)
     {
@@ -829,6 +838,14 @@ le_result_t pa_pcm_Close
             le_thread_Join(pcmThreadRef, NULL);
 
             LE_DEBUG("Close ALSA");
+            // Wait for audio stream to be completed.
+            if ((-1 == nanosleep(&endDelay, NULL))
+                && (EINTR != errno))
+            {
+              LE_ERROR("nanosleep(%ld.%ld) fails: %m",
+                       endDelay.tv_sec, endDelay.tv_nsec);
+            }
+
             if (pcm_close(alsaIntfPtr->pcmPtr) == 0)
             {
                 LE_DEBUG("end PCM thread");
