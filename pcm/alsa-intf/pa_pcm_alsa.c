@@ -917,7 +917,7 @@ le_result_t pa_pcm_InitPlayback
     le_audio_SamplePcmConfig_t* pcmConfig   ///< [IN] Samples PCM configuration
 )
 {
-    uint32_t flags = PCM_MMAP | PCM_OUT;
+    uint32_t flags = PCM_NMMAP | PCM_OUT;
 
     return InitPcmPlaybackCapture( pcmHandlePtr,
                                    devicePtr,
