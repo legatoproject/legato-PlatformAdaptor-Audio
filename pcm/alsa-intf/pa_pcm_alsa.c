@@ -549,10 +549,12 @@ static le_result_t RunPlayback
     int err;
     long avail;
     int nfds = 1;
-    uint8_t* bufferPtr = NULL;
-    uint32_t bufLen=0;
+    uint32_t bufLen = pcm->period_size;
+    uint8_t data[bufLen];
+    uint8_t* bufferPtr = data;
     le_result_t res = LE_UNAVAILABLE;
     int myErrno;
+    memset(data,0,bufLen);
 
     // loop until all PCM frames have been sent
     for(;;)
@@ -568,59 +570,62 @@ static le_result_t RunPlayback
             alsaIntfPtr->start = 0;
         }
 
-        // Sync the current Application pointer from the kernel
-        pcm->sync_ptr->flags = SNDRV_PCM_SYNC_PTR_APPL | SNDRV_PCM_SYNC_PTR_AVAIL_MIN;
-
-        err = sync_ptr(pcm);
-        if (err == EPIPE)
+        // MMAP
+        if (pcm->flags & PCM_MMAP)
         {
-            LE_ERROR("Failed in sync_ptr");
-            // We failed to make our window -- try to restart
-            pcm->underruns++;
-            pcm->running = 0;
-            continue;
-        }
+            // Sync the current Application pointer from the kernel
+            pcm->sync_ptr->flags = SNDRV_PCM_SYNC_PTR_APPL | SNDRV_PCM_SYNC_PTR_AVAIL_MIN;
 
-        // Check for the available buffer in driver. If available buffer is less than
-        // avail_min we need to wait
-        avail = pcm_avail(pcm);
-
-        if (avail < 0)
-        {
-            return LE_FAULT;
-        }
-
-        // If no space left in the driver, wait the timeout of snd timer
-        if (avail < pcm->sw_p->avail_min)
-        {
-            err = poll(alsaIntfPtr->pfd, nfds, PCM_DEFAULT_TIME);
-            if(err == 0)
+            err = sync_ptr(pcm);
+            if (err == EPIPE)
             {
-                LE_ERROR("Poll timeout in %d seconds.\n", PCM_DEFAULT_TIME/1000);
-                return LE_FAULT;
-            }
-            if (err < 0)
-            {
-                LE_ERROR("Failed in poll: %m");
-                return LE_FAULT;
-            }
-            if (alsaIntfPtr->pfd[0].revents & POLLERR)
-            {
-                LE_ERROR("Event POLLERR returned by poll");
-                // Do pcm_prepare() in next loop
+                LE_ERROR("Failed in sync_ptr");
+                // We failed to make our window -- try to restart
+                pcm->underruns++;
                 pcm->running = 0;
-                // This tag triggers pcm device start read data from buffer in pcm_write()
-                pcm->start = 0;
+                continue;
             }
-            continue;
-        }
 
-        // Now that we have buffer size greater than avail_min available to to be written we
-        // need to calcutate the buffer offset where we can start writting.
+            // Check for the available buffer in driver. If available buffer is less than
+            // avail_min we need to wait
+            avail = pcm_avail(pcm);
+
+            if (avail < 0)
+            {
+                return LE_FAULT;
+            }
+
+            // If no space left in the driver, wait the timeout of snd timer
+            if (avail < pcm->sw_p->avail_min)
+            {
+                err = poll(alsaIntfPtr->pfd, nfds, PCM_DEFAULT_TIME);
+                if(err == 0)
+                {
+                    LE_ERROR("Poll timeout in %d seconds.\n", PCM_DEFAULT_TIME/1000);
+                    return LE_FAULT;
+                }
+                if (err < 0)
+                {
+                    LE_ERROR("Failed in poll: %m");
+                    return LE_FAULT;
+                }
+                if (alsaIntfPtr->pfd[0].revents & POLLERR)
+                {
+                    LE_ERROR("Event POLLERR returned by poll");
+                    // Do pcm_prepare() in next loop
+                    pcm->running = 0;
+                    // This tag triggers pcm device start read data from buffer in pcm_write()
+                    pcm->start = 0;
+                }
+                continue;
+            }
+
+            // Now that we have buffer size greater than avail_min available to to be written we
+            // need to calcutate the buffer offset where we can start writting.
+            bufferPtr = dst_address(pcm);
+        }
 
         bufLen = pcm->period_size;
-        bufferPtr = dst_address(pcm);
-
         memset(bufferPtr, 0, bufLen);
 
         // Get the PCM frames (from upper layer) to be sent to ALSA
@@ -685,25 +690,21 @@ static void* PlaybackThread
 )
 {
     AlsaIntf_t* alsaIntfPtr = (AlsaIntf_t*) contextPtr;
-    struct pcm *pcmPtr = (struct pcm *) alsaIntfPtr->pcmPtr;
     le_result_t res = LE_OK;
 
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
-    if (pcmPtr->flags & PCM_MMAP)
+    alsaIntfPtr->isPlaybackRunning = true;
+    // run in loop if no error, until the thread is killed
+    // This loop is useful for the play samples use case.
+    while (res != LE_FAULT)
     {
-        alsaIntfPtr->isPlaybackRunning = true;
-        // run in loop if no error, until the thread is killed
-        // This loop is useful for the play samples use case.
-        while (res != LE_FAULT)
-        {
-            res = RunPlayback(alsaIntfPtr);
+        res = RunPlayback(alsaIntfPtr);
 
-            if (alsaIntfPtr->resultFunc)
-            {
-                LE_DEBUG("Play end, res = %d", res);
-                alsaIntfPtr->resultFunc(res, alsaIntfPtr->contextPtr);
-            }
+        if (alsaIntfPtr->resultFunc)
+        {
+            LE_DEBUG("Play end, res = %d", res);
+            alsaIntfPtr->resultFunc(res, alsaIntfPtr->contextPtr);
         }
     }
 
